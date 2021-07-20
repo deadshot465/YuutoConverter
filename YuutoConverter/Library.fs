@@ -14,9 +14,17 @@ type ConverterType =
     | Currency of (string * string)
 
 module Converter =
+    /// Available length units for conversion.
+    let AvailableLengthes = [| "km"; "m"; "cm"; "in"; "ft"; "mi"; "au" |]
+    /// Available weight units for conversion.
+    let AvailableWeights = [| "kg"; "g"; "lb" |]
+    /// Available temperature units for conversion.
+    let AvailableTemperatures = [| "c"; "f"; "k" |]
     let private conversionTable = JsonSerializer.Deserialize<ConversionTable>(File.ReadAllText("Assets/convert.json"))
     let private baseUrl = "http://api.exchangeratesapi.io/v1/latest"
     
+    /// [exchangeCurrency source target token httpClient] will call remote API and convert source currency to target currency using specified token and HttpClient.
+    /// Throws exception when HTTP request fails, or unable to find the denoted currency type to fulfill the conversion.
     let private exchangeCurrency (source: string) (target: string) token (httpClient: HttpClient) = async {
         let requestUrl = $"{baseUrl}?access_key={token}&symbols={source},{target}"
         let! response = httpClient.GetAsync(requestUrl) |> Async.AwaitTask
@@ -30,9 +38,10 @@ module Converter =
                 failwith "Unable to find corresponding currency type."
                 return 0.0
             else
-                return (double)1.0 / (responseResult.rates.[source] * responseResult.rates.[target])
+                return responseResult.rates.[target] / responseResult.rates.[source]
     }
     
+    /// [checkCompatible converterType] will check units to be converted are compatible with each other or not.
     [<Pure>]
     let private checkCompatible converterType =
         match converterType with
@@ -44,14 +53,47 @@ module Converter =
             if conversionTable.temperature.ContainsKey(source) then conversionTable.temperature.[source].ContainsKey(target) else false
         | _ -> true
         
+    /// [fixLetterCases converterType] will destruct converterType and forcibly turn letters to valid cases. 
     [<Pure>]
-    let fixLetterCases converterType =
+    let private fixLetterCases converterType =
         match converterType with
         | Length (source, target) -> Length (source.ToLower(), target.ToLower())
         | Weight (source, target) -> Weight (source.ToLower(), target.ToLower())
         | Temperature (source, target) -> Temperature (source.ToLower(), target.ToLower())
         | Currency (source, target) -> Currency (source.ToUpper(), target.ToUpper())
     
+    /// [computeTemperature source target amount] will convert the amount in source temperature unit to target temperature unit.
+    /// Throws exception when specified source temperature unit is unsupported/unknown.
+    let private computeTemperature (source: string) (target: string) (amount: double) =
+        match source with
+        | "c" ->
+            let adjustment =
+                match target with
+                | "f" -> 32.0
+                | "k" -> 273.15
+                | _ -> 0.0
+            (amount / conversionTable.temperature.[source].[target]) + adjustment
+        | "f" ->
+            let adjustment =
+                match target with
+                | "c" -> -32.0
+                | "k" -> 459.67
+                | _ -> 0.0
+            (amount + adjustment) / conversionTable.temperature.[source].[target]
+        | "k" ->
+            let adjustment =
+                match target with
+                | "c" -> -273.15
+                | "f" -> -459.67
+                | _ -> 0.0
+            (amount / conversionTable.temperature.[source].[target]) + adjustment
+        | _ ->
+            failwith "Unsupported conversion between temperatures."
+            0.0
+    
+    /// [Convert converterType amount token httpClient] will destruct converterType and convert the specified amount from corresponding source units to target units.
+    /// In case of converting between currencies, the amount in source currency will be converted to target currency using specified token and HttpClient.
+    /// Throws exception when source unit and target unit are incompatible, or no token is specified when converting currencies.
     let Convert converterType amount (token: string option) (httpClient: HttpClient option) =
         let converterTypeCaseFixed = fixLetterCases converterType
         if not (checkCompatible converterTypeCaseFixed) then
@@ -62,7 +104,7 @@ module Converter =
                 match converterTypeCaseFixed with
                 | Length (source, target) -> return amount / conversionTable.length.[source].[target]
                 | Weight (source, target) -> return amount / conversionTable.weight.[source].[target]
-                | Temperature (source, target) -> return amount / conversionTable.temperature.[source].[target]
+                | Temperature (source, target) -> return computeTemperature source target amount
                 | Currency (source, target) ->
                     let client = match httpClient with
                                  | Some(c) -> c
